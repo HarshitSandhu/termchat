@@ -1,23 +1,22 @@
 import json
-import time
 from typing import Generator
 
 import httpx
 
-from termchat.config import OPENROUTER_API_KEY, MAX_TOKENS
+from termchat.config import CEREBRAS_API_KEY, MAX_TOKENS
 from termchat.search import SEARCH_TOOL_SCHEMA, tavily_search
 
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
+API_URL = "https://api.cerebras.ai/v1/chat/completions"
 
 
 class ChatClient:
     def __init__(self):
         self.http = httpx.Client(timeout=60)
         self.headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {CEREBRAS_API_KEY}",
             "Content-Type": "application/json",
         }
-        self.last_generation_id: str | None = None
+        self.last_usage: dict | None = None
 
     def stream_chat(
         self, messages: list[dict], model: str
@@ -36,6 +35,7 @@ class ChatClient:
             "messages": messages,
             "max_tokens": MAX_TOKENS,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "tools": tools,
         }
 
@@ -61,9 +61,13 @@ class ChatClient:
                 except json.JSONDecodeError:
                     continue
 
-                # Capture generation ID from the first chunk
-                if gen_id := chunk.get("id"):
-                    self.last_generation_id = gen_id
+                # Capture usage from any chunk that includes it
+                if usage := chunk.get("usage"):
+                    self.last_usage = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
 
                 delta = (
                     chunk.get("choices", [{}])[0].get("delta", {})
@@ -100,7 +104,6 @@ class ChatClient:
         if tool_calls_accum:
             tool_calls_list = [tool_calls_accum[i] for i in sorted(tool_calls_accum)]
 
-            # Add assistant message with tool calls
             assistant_msg = {"role": "assistant", "content": collected_content or None, "tool_calls": tool_calls_list}
             messages = [*messages, assistant_msg]
 
@@ -133,27 +136,8 @@ class ChatClient:
         return collected_content or None
 
     def get_generation_stats(self) -> dict | None:
-        """Fetch token usage and cost for the last generation from OpenRouter."""
-        if not self.last_generation_id:
-            return None
-        # OpenRouter needs a moment to finalize generation stats
-        time.sleep(1)
-        try:
-            resp = self.http.get(
-                f"https://openrouter.ai/api/v1/generation?id={self.last_generation_id}",
-                headers=self.headers,
-            )
-            if resp.status_code != 200:
-                return None
-            data = resp.json().get("data", {})
-            return {
-                "prompt_tokens": data.get("tokens_prompt", 0),
-                "completion_tokens": data.get("tokens_completion", 0),
-                "total_tokens": (data.get("tokens_prompt", 0) + data.get("tokens_completion", 0)),
-                "cost": data.get("total_cost", 0),
-            }
-        except Exception:
-            return None
+        """Return token usage captured from the last streaming response."""
+        return self.last_usage
 
     def close(self):
         self.http.close()

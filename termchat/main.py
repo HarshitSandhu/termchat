@@ -1,4 +1,8 @@
+import os
+import select as io_select
 import sys
+import termios
+import tty
 
 from rich.console import Console
 from rich.live import Live
@@ -10,12 +14,88 @@ from rich.text import Text
 from rich.theme import Theme
 
 from termchat.client import ChatClient
-from termchat.config import OPENROUTER_API_KEY, POPULAR_MODELS, load_last_model, save_last_model
+from termchat.config import CEREBRAS_API_KEY, POPULAR_MODELS, load_last_model, save_last_model
 from termchat.history import list_conversations, load_conversation, save_conversation
 from termchat.search import tavily_search
 
 theme = Theme({"info": "dim", "success": "green", "warning": "yellow", "error": "red"})
 console = Console(theme=theme)
+
+
+def _read_key(fd: int) -> str:
+    """Read one keypress directly from fd. Returns key or escape sequence string."""
+    ch = os.read(fd, 1).decode("utf-8", errors="replace")
+    if ch == "\x1b":
+        ready, _, _ = io_select.select([fd], [], [], 0.05)
+        if ready:
+            ch += os.read(fd, 2).decode("utf-8", errors="replace")
+    return ch
+
+
+def select_from_list(options: list[str], current: str | None = None) -> str | None:
+    """Arrow-key selector rendered with plain ANSI codes. Returns chosen option or None."""
+    if not options or not sys.stdin.isatty():
+        return None
+
+    idx = options.index(current) if current in options else 0
+    n = len(options)
+
+    def _render(selected: int) -> None:
+        sys.stdout.write("\r")
+        for i, opt in enumerate(options):
+            sys.stdout.write("\x1b[2K")  # clear line
+            if i == selected:
+                sys.stdout.write(f"\x1b[1;36m  ❯ {opt}\x1b[0m")
+            else:
+                sys.stdout.write(f"\x1b[2m    {opt}\x1b[0m")
+            if i < n - 1:
+                sys.stdout.write("\r\n")
+        sys.stdout.flush()
+
+    def _to_top() -> None:
+        if n > 1:
+            sys.stdout.write(f"\x1b[{n - 1}A")
+        sys.stdout.write("\r")
+
+    def _clear() -> None:
+        _to_top()
+        for i in range(n):
+            sys.stdout.write("\x1b[2K")
+            if i < n - 1:
+                sys.stdout.write("\r\n")
+        _to_top()
+        sys.stdout.flush()
+
+    sys.stdout.write("\n")
+    _render(idx)
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    result = None
+    try:
+        tty.setcbreak(fd)
+        while True:
+            key = _read_key(fd)
+            if key in ("\x03", "\x1b"):
+                break
+            elif key in ("\r", "\n"):
+                result = options[idx]
+                break
+            elif key == "\x1b[A":
+                idx = (idx - 1) % len(options)
+            elif key == "\x1b[B":
+                idx = (idx + 1) % len(options)
+            _to_top()
+            _render(idx)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    _clear()
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return result
 
 
 def print_help():
@@ -71,8 +151,11 @@ def handle_command(
 
     elif command == "/model":
         if not arg:
-            console.print(f"  [dim]Current model:[/dim] [cyan]{model}[/cyan]")
-            console.print("  [dim]Usage: /model <model-name>[/dim]")
+            chosen = select_from_list(POPULAR_MODELS, current=model)
+            if chosen:
+                model = chosen
+                save_last_model(model)
+                console.print(f"  [dim]Switched to model:[/dim] [cyan]{model}[/cyan]")
         else:
             model = arg.strip()
             save_last_model(model)
@@ -163,14 +246,12 @@ def stream_response(client: ChatClient, messages: list[dict], model: str) -> str
                     live.update(Text(full_content))
         console.print()
 
-        # Display token usage and cost
+        # Display token usage
         stats = client.get_generation_stats()
         if stats:
-            cost = stats["cost"]
-            cost_str = f"${cost:.4f}" if cost else "$0.0000"
             console.print(
                 Text(
-                    f"tokens: {stats['prompt_tokens']} in · {stats['completion_tokens']} out  |  cost: {cost_str}",
+                    f"tokens: {stats['prompt_tokens']} in · {stats['completion_tokens']} out",
                     style="dim",
                 )
             )
@@ -182,9 +263,9 @@ def stream_response(client: ChatClient, messages: list[dict], model: str) -> str
 
 
 def main():
-    if not OPENROUTER_API_KEY:
+    if not CEREBRAS_API_KEY:
         console.print(
-            "[red]Error:[/red] OPENROUTER_API_KEY not set. "
+            "[red]Error:[/red] CEREBRAS_API_KEY not set. "
             "Copy .env.example to .env and add your key."
         )
         sys.exit(1)
