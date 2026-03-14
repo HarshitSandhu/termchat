@@ -3,6 +3,7 @@ import select as io_select
 import sys
 import termios
 import tty
+from typing import Optional
 
 from rich.console import Console
 from rich.live import Live
@@ -14,9 +15,15 @@ from rich.text import Text
 from rich.theme import Theme
 
 from termchat.client import ChatClient
-from termchat.config import CEREBRAS_API_KEY, POPULAR_MODELS, load_last_model, save_last_model
+from termchat.config import (
+    CEREBRAS_API_KEY,
+    POPULAR_MODELS,
+    load_last_model,
+    save_last_model,
+)
+from termchat.deepsearch import deep_search_current_events
 from termchat.history import list_conversations, load_conversation, save_conversation
-from termchat.search import tavily_search
+from termchat.search import tavily_search_results
 
 theme = Theme({"info": "dim", "success": "green", "warning": "yellow", "error": "red"})
 console = Console(theme=theme)
@@ -105,6 +112,7 @@ def print_help():
     table.add_row("/model <name>", "Switch to a different model")
     table.add_row("/models", "List popular OpenRouter models")
     table.add_row("/search <query>", "Manual web search via Tavily")
+    table.add_row("/deepsearch <topic>", "Run multi-step current-events research")
     table.add_row("/save", "Save current conversation")
     table.add_row("/load", "Load a previous conversation")
     table.add_row("/history", "List saved conversations")
@@ -123,6 +131,21 @@ LOGO = r"""
 """
 
 
+def print_status(model: str, client: ChatClient, active_tool: Optional[str] = None):
+    stats = client.get_generation_stats()
+    total_prompt = stats.get("prompt_tokens", 0) if stats else 0
+    total_completion = stats.get("completion_tokens", 0) if stats else 0
+
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("dim", style="dim")
+    table.add_column("")
+    table.add_row("Model:", f"[cyan]{model}[/cyan]")
+    table.add_row("Tokens:", f"{total_prompt} in · {total_completion} out")
+    if active_tool:
+        table.add_row("Active Tool:", f"[yellow]{active_tool}[/yellow]")
+    console.print(table)
+
+
 def print_welcome(model: str):
     console.print(LOGO)
     console.print(
@@ -130,10 +153,32 @@ def print_welcome(model: str):
     )
 
 
+def handle_nl_shortcuts(cmd: str) -> str | None:
+    """Check for natural language shortcuts, return equivalent /command."""
+    lower = cmd.lower()
+    if "switch to model" in lower or "change model to" in lower:
+        # Extract model name
+        parts = (
+            lower.replace("switch to model", "").replace("change model to", "").strip()
+        )
+        if parts in [m.lower() for m in POPULAR_MODELS]:
+            return f"/model {parts}"
+    # Add more NL if needed
+    return None
+
+
 def handle_command(
-    cmd: str, messages: list[dict], model: str, client: ChatClient
+    cmd: str,
+    messages: list[dict],
+    model: str,
+    client: ChatClient,
 ) -> tuple[list[dict], str, bool]:
     """Handle a slash command. Returns (messages, model, should_continue)."""
+    # Check for NL shortcuts
+    nl_shortcut = handle_nl_shortcuts(cmd)
+    if nl_shortcut:
+        cmd = nl_shortcut
+
     parts = cmd.split(maxsplit=1)
     command = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
@@ -162,10 +207,15 @@ def handle_command(
             console.print(f"  [dim]Switched to model:[/dim] [cyan]{model}[/cyan]")
 
     elif command == "/models":
-        table = Table(title="Popular Models", show_header=False, box=None)
-        table.add_column(style="cyan")
+        table = Table(
+            title="Popular Models", show_header=False, box=None, show_lines=False
+        )
+        table.add_column("cyan", style="cyan")
+        table.add_column("Current", style="dim")
+        current_marker = " ✓" if model in POPULAR_MODELS else ""
         for m in POPULAR_MODELS:
-            table.add_row(m)
+            marker = " ✓" if m == model else ""
+            table.add_row(m, marker)
         console.print(table)
 
     elif command == "/search":
@@ -173,8 +223,67 @@ def handle_command(
             console.print("  [dim]Usage: /search <query>[/dim]")
         else:
             with console.status("Searching..."):
-                result = tavily_search(arg)
-            console.print(Markdown(result))
+                results = tavily_search_results(arg)
+            if isinstance(results, str):
+                console.print(f"[red]Error:[/red] {results}")
+            elif results:
+                table = Table(title=f"Search: {arg}", show_header=True, box="simple")
+                table.add_column("Title", style="bold cyan")
+                table.add_column("Snippet")
+                table.add_column("URL", style="blue underline")
+                for r in results:
+                    title = r.get("title", "No title")
+                    content = r.get("content", "No content")
+                    snippet = content[:150] + "..." if len(content) > 150 else content
+                    url = r.get("url", "No url")
+                    table.add_row(title, snippet, url)
+                console.print(table)
+            else:
+                console.print("  [dim]No results found.[/dim]")
+
+    elif command == "/deepsearch":
+        if not arg:
+            console.print("  [dim]Usage: /deepsearch <topic>[/dim]")
+        else:
+            stages: list[str] = []
+
+            def update_stage(stage: str) -> None:
+                stages.append(stage)
+
+            with console.status("Deep search: starting...") as status:
+
+                def progress(stage: str) -> None:
+                    update_stage(stage)
+                    status.update(f"Deep search: {stage.lower()}...")
+
+                report, metadata = deep_search_current_events(
+                    arg, client, model, progress
+                )
+
+            console.print(Rule(title=f"Deep Search: {arg}", style="dim"))
+            console.print(Markdown(report))
+            if metadata.get("errors"):
+                console.print()
+                console.print("[yellow]Warnings:[/yellow]")
+                for error in metadata["errors"]:
+                    console.print(f"  [dim]- {error}[/dim]")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"/deepsearch {arg}",
+                }
+            )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": report,
+                    "metadata": {
+                        "type": "deepsearch",
+                        "stages": stages,
+                        **metadata,
+                    },
+                }
+            )
 
     elif command == "/save":
         if not messages:
@@ -246,16 +355,8 @@ def stream_response(client: ChatClient, messages: list[dict], model: str) -> str
                     live.update(Text(full_content))
         console.print()
 
-        # Display token usage
-        stats = client.get_generation_stats()
-        if stats:
-            console.print(
-                Text(
-                    f"tokens: {stats['prompt_tokens']} in · {stats['completion_tokens']} out",
-                    style="dim",
-                )
-            )
-            console.print()
+        # Display status bar
+        print_status(model, client)
     except KeyboardInterrupt:
         console.print("\n  [dim]Response interrupted.[/dim]\n")
 
@@ -275,6 +376,7 @@ def main():
     client = ChatClient()
 
     print_welcome(model)
+    print_status(model, client)
 
     try:
         while True:
@@ -286,19 +388,27 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.startswith("/"):
-                messages, model, should_continue = handle_command(
-                    user_input, messages, model, client
-                )
+            if user_input.startswith("/") or handle_nl_shortcuts(
+                user_input
+            ):  # Allow NL shortcuts without /
+                messages, model, should_continue = handle_command(user_input, messages, model, client)
                 if not should_continue:
                     break
+                print_status(model, client)  # Update status after command
                 continue
 
             messages.append({"role": "user", "content": user_input})
 
+            active_tool = None
+            if user_input.startswith("/deepsearch"):
+                active_tool = "deepsearch"
+            print_status(model, client, active_tool or "chatting")
+
             content = stream_response(client, messages, model)
             if content:
                 messages.append({"role": "assistant", "content": content})
+
+            print_status(model, client)  # Update after response
 
     except KeyboardInterrupt:
         console.print("\n  [dim]Goodbye![/dim]")

@@ -27,6 +27,37 @@ class ChatClient:
         full_response = yield from self._stream_request(messages, model, tools)
         return full_response
 
+    def complete_chat(self, messages: list[dict], model: str) -> str | None:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+            "stream": False,
+        }
+        try:
+            resp = self.http.post(API_URL, json=payload, headers=self.headers, timeout=120)
+        except httpx.HTTPError:
+            return None
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        usage = data.get("usage") or {}
+        self.last_usage = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+
+        choices = data.get("choices") or []
+        if not choices:
+            return None
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        return None
+
     def _stream_request(
         self, messages: list[dict], model: str, tools: list[dict]
     ) -> Generator[str, None, str | None]:

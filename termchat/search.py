@@ -1,4 +1,5 @@
 import httpx
+
 from termchat.config import TAVILY_API_KEY
 
 SEARCH_TOOL_SCHEMA = {
@@ -20,7 +21,7 @@ SEARCH_TOOL_SCHEMA = {
 }
 
 
-def tavily_search(query: str) -> str:
+def tavily_search_results(query: str, max_results: int = 5) -> list[dict] | str:
     if not TAVILY_API_KEY:
         return "Error: TAVILY_API_KEY not set in .env file."
 
@@ -30,7 +31,7 @@ def tavily_search(query: str) -> str:
             json={
                 "api_key": TAVILY_API_KEY,
                 "query": query,
-                "max_results": 5,
+                "max_results": max_results,
             },
             timeout=15,
         )
@@ -40,6 +41,16 @@ def tavily_search(query: str) -> str:
         return f"Search error: {e}"
 
     results = data.get("results", [])
+    if not results:
+        return []
+
+    return results
+
+
+def tavily_search(query: str) -> str:
+    results = tavily_search_results(query)
+    if isinstance(results, str):
+        return results
     if not results:
         return "No search results found."
 
