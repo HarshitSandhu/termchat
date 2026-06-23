@@ -1,0 +1,25 @@
+[package]
+name = "termchat"
+version = "0.1.0"
+edition = "2021"
+description = "CLI chat tool using Cerebras with Tavily search integration"
+license = "MIT"
+
+[[bin]]
+name = "termchat"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+futures-util = "0.3"
+termimad = "0.31"
+crossterm = "0.28"
+rustyline = "15"
+chrono = "0.4"
+indicatif = "0.17"
+unicode-width = "0.2"
+anyhow = "1"
