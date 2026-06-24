@@ -331,8 +331,10 @@ async fn handle_command(
                     let api_key = api_key_for(selected);
                     client.set_provider(selected.base_url().to_string(), api_key.clone());
 
-                    // Models differ per provider; reset to this provider's default.
-                    *model = selected.default_model().to_string();
+                    // Models differ per provider; let the user pick from this
+                    // provider's list (arrow keys), falling back to its default.
+                    *model = select_from_list(selected.popular_models(), selected.default_model())
+                        .unwrap_or_else(|| selected.default_model().to_string());
                     save_last_model(model);
 
                     println!(
@@ -367,16 +369,24 @@ async fn handle_command(
         }
 
         "/models" => {
-            println!(
-                "\n  {} {}",
-                "Popular Models".bold(),
-                format!("({})", provider.display_name()).dim()
-            );
-            for m in provider.popular_models() {
-                let marker = if *m == model { " ✓" } else { "" };
-                println!("    {}{}", m.cyan(), marker.dim());
+            // Arrow-key picker (same as `/model`); falls back to a static list
+            // when there's no TTY.
+            if let Some(chosen) = select_from_list(provider.popular_models(), model) {
+                *model = chosen;
+                save_last_model(model);
+                println!("  {} {}", "Switched to model:".dim(), model.clone().cyan());
+            } else {
+                println!(
+                    "\n  {} {}",
+                    "Popular Models".bold(),
+                    format!("({})", provider.display_name()).dim()
+                );
+                for m in provider.popular_models() {
+                    let marker = if *m == model { " ✓" } else { "" };
+                    println!("    {}{}", m.cyan(), marker.dim());
+                }
+                println!();
             }
-            println!();
         }
 
         "/search" => {
