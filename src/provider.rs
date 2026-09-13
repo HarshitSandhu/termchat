@@ -159,3 +159,37 @@ pub fn mask_key(key: &str) -> String {
         format!("{head}…{tail}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_loose_matches_id_and_display_name() {
+        assert_eq!(Provider::from_loose("cerebras"), Some(Provider::Cerebras));
+        assert_eq!(
+            Provider::from_loose("  OpenRouter "),
+            Some(Provider::OpenRouter)
+        );
+        assert_eq!(
+            Provider::from_loose("fireworks ai"),
+            Some(Provider::Fireworks)
+        );
+        assert_eq!(Provider::from_loose("FIREWORKS"), Some(Provider::Fireworks));
+        assert_eq!(Provider::from_loose("nope"), None);
+    }
+
+    #[test]
+    fn default_model_is_first_popular_model() {
+        for p in Provider::ALL {
+            assert_eq!(p.default_model(), p.popular_models()[0]);
+        }
+    }
+
+    #[test]
+    fn mask_key_hides_the_middle() {
+        assert_eq!(mask_key(""), "•");
+        assert_eq!(mask_key("short"), "•••••");
+        assert_eq!(mask_key("sk-abcdefghijkl"), "sk-a…ijkl");
+    }
+}

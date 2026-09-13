@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod deepsearch;
 mod history;
+mod http;
 mod provider;
 mod search;
 
@@ -71,11 +72,17 @@ fn print_status(model: &str, client: &ChatClient, active_tool: Option<&str>) {
 
 fn print_help() {
     let rows = [
-        ("/provider [name]", "Switch model provider & set its API key"),
+        (
+            "/provider [name]",
+            "Switch model provider & set its API key",
+        ),
         ("/model <name>", "Switch to a different model"),
         ("/models", "List popular models for the current provider"),
         ("/search <query>", "Manual web search via Tavily"),
-        ("/deepsearch <topic>", "Run multi-step current-events research"),
+        (
+            "/deepsearch <topic>",
+            "Run multi-step current-events research",
+        ),
         ("/save", "Save current conversation"),
         ("/load", "Load a previous conversation"),
         ("/history", "List saved conversations"),
@@ -106,6 +113,23 @@ fn handle_nl_shortcuts(cmd: &str, models: &[&str]) -> Option<String> {
     None
 }
 
+/// Enables raw mode and restores it when dropped, so an early return, error,
+/// or panic can't leave the terminal in raw mode.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Self {
+        let _ = terminal::enable_raw_mode();
+        RawModeGuard
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 /// Arrow-key selector rendered in raw mode. Returns the chosen option or None.
 fn select_from_list(options: &[&str], current: &str) -> Option<String> {
     if options.is_empty() || !std::io::stdin().is_terminal() {
@@ -132,7 +156,7 @@ fn select_from_list(options: &[&str], current: &str) -> Option<String> {
     };
 
     println!();
-    let _ = terminal::enable_raw_mode();
+    let _raw_mode = RawModeGuard::enable();
     render(&mut out, idx);
 
     let mut result = None;
@@ -173,7 +197,6 @@ fn select_from_list(options: &[&str], current: &str) -> Option<String> {
         terminal::Clear(terminal::ClearType::FromCursorDown)
     )
     .ok();
-    let _ = terminal::disable_raw_mode();
     result
 }
 
@@ -242,7 +265,9 @@ async fn stream_response(
 
     println!();
     print_status(model, client, None);
-    content.map(|c| c.trim().to_string()).filter(|c| !c.is_empty())
+    content
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
 }
 
 fn spinner(message: &str) -> ProgressBar {
@@ -266,7 +291,8 @@ async fn handle_command(
     client: &mut ChatClient,
     skin: &MadSkin,
 ) -> bool {
-    let cmd = handle_nl_shortcuts(cmd, provider.popular_models()).unwrap_or_else(|| cmd.to_string());
+    let cmd =
+        handle_nl_shortcuts(cmd, provider.popular_models()).unwrap_or_else(|| cmd.to_string());
     let mut parts = cmd.splitn(2, char::is_whitespace);
     let command = parts.next().unwrap_or("").to_lowercase();
     let arg = parts.next().unwrap_or("").trim().to_string();
@@ -404,9 +430,9 @@ async fn handle_command(
                     Ok(results) => {
                         println!("\n  {} {}", "Search:".bold(), arg.clone().cyan());
                         for r in &results {
-                            let title = r.get("title").and_then(Value::as_str).unwrap_or("No title");
-                            let content =
-                                r.get("content").and_then(Value::as_str).unwrap_or("");
+                            let title =
+                                r.get("title").and_then(Value::as_str).unwrap_or("No title");
+                            let content = r.get("content").and_then(Value::as_str).unwrap_or("");
                             let snippet: String = content.chars().take(150).collect();
                             let url = r.get("url").and_then(Value::as_str).unwrap_or("No url");
                             println!("  {}", title.bold().cyan());
@@ -478,38 +504,62 @@ async fn handle_command(
             if files.is_empty() {
                 println!("  {}", "No saved conversations found.".dim());
             } else {
-                for (i, f) in files.iter().take(20).enumerate() {
-                    let stem = f.file_stem().unwrap_or_default().to_string_lossy();
-                    println!("  {} {}", format!("{}", i + 1).bold(), stem);
-                }
-                print!("  {} ", "Load which #? (0 to cancel):".dim());
-                std::io::stdout().flush().ok();
-                let mut choice = String::new();
-                std::io::stdin().read_line(&mut choice).ok();
-                match choice.trim().parse::<usize>() {
-                    Ok(0) => {}
-                    Ok(num) if num >= 1 && num <= files.len() => {
-                        match load_conversation(&files[num - 1]) {
-                            Ok((loaded, loaded_model)) => {
-                                *messages = loaded;
-                                *model = loaded_model;
-                                save_last_model(model);
-                                println!(
-                                    "  {}",
-                                    format!(
-                                        "Loaded {} ({} messages, model: {})",
-                                        files[num - 1].file_name().unwrap_or_default().to_string_lossy(),
-                                        messages.len(),
-                                        model
-                                    )
-                                    .dim()
-                                );
-                            }
-                            Err(e) => println!("{} {e}", "Error:".red()),
-                        }
+                let visible: Vec<&std::path::PathBuf> = files.iter().take(20).collect();
+                let stems: Vec<String> = visible
+                    .iter()
+                    .map(|f| {
+                        f.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    })
+                    .collect();
+
+                let selected = if std::io::stdin().is_terminal() {
+                    let refs: Vec<&str> = stems.iter().map(String::as_str).collect();
+                    select_from_list(&refs, "").and_then(|stem| {
+                        visible
+                            .iter()
+                            .find(|f| f.file_stem().unwrap_or_default().to_string_lossy() == stem)
+                            .map(|f| (*f).clone())
+                    })
+                } else {
+                    // Non-TTY fallback: numbered prompt so piped input still works.
+                    for (i, stem) in stems.iter().enumerate() {
+                        println!("  {} {}", format!("{}", i + 1).bold(), stem);
                     }
-                    Ok(_) => println!("  {}", "Invalid selection.".dim()),
-                    Err(_) => println!("  {}", "Invalid input.".dim()),
+                    print!("  {} ", "Load which #? (0 to cancel):".dim());
+                    std::io::stdout().flush().ok();
+                    let mut choice = String::new();
+                    std::io::stdin().read_line(&mut choice).ok();
+                    choice.trim().parse::<usize>().ok().and_then(|num| {
+                        if num >= 1 && num <= visible.len() {
+                            Some(visible[num - 1].clone())
+                        } else {
+                            None
+                        }
+                    })
+                };
+
+                if let Some(path) = selected {
+                    match load_conversation(&path) {
+                        Ok((loaded, loaded_model)) => {
+                            *messages = loaded;
+                            *model = loaded_model;
+                            save_last_model(model);
+                            println!(
+                                "  {}",
+                                format!(
+                                    "Loaded {} ({} messages, model: {})",
+                                    path.file_name().unwrap_or_default().to_string_lossy(),
+                                    messages.len(),
+                                    model
+                                )
+                                .dim()
+                            );
+                        }
+                        Err(e) => println!("{} {e}", "Error:".red()),
+                    }
                 }
             }
         }
@@ -614,4 +664,29 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nl_shortcut_maps_known_model() {
+        let models = &["gpt-oss-120b", "llama3.1-8b"];
+        assert_eq!(
+            handle_nl_shortcuts("switch to model llama3.1-8b", models),
+            Some("/model llama3.1-8b".to_string())
+        );
+        assert_eq!(
+            handle_nl_shortcuts("change model to gpt-oss-120b", models),
+            Some("/model gpt-oss-120b".to_string())
+        );
+    }
+
+    #[test]
+    fn nl_shortcut_ignores_unknown_or_unrelated_input() {
+        let models = &["gpt-oss-120b"];
+        assert_eq!(handle_nl_shortcuts("switch to model nope", models), None);
+        assert_eq!(handle_nl_shortcuts("hello there", models), None);
+    }
 }

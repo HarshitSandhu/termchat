@@ -2,7 +2,8 @@
 name = "termchat"
 version = "0.1.0"
 edition = "2021"
-description = "CLI chat tool using Cerebras with Tavily search integration"
+rust-version = "1.74"
+description = "Terminal chat client for OpenAI-compatible LLM providers (Cerebras, OpenRouter, Fireworks AI) with Tavily web search"
 license = "MIT"
 
 [[bin]]

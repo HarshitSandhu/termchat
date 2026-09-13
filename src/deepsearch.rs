@@ -82,7 +82,11 @@ async fn collect_results(queries: &[String]) -> (Vec<DeepSearchResult>, Vec<Stri
         }
     }
 
-    collected.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    collected.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     collected.truncate(10);
     (collected, errors)
 }
@@ -179,9 +183,7 @@ fn fallback_report(findings: &[DeepSearchResult], now: &DateTime<Local>) -> Stri
     lines.push(String::new());
     lines.push("## Open Questions".to_string());
     lines.push("- Which of these reports are primary reporting versus rewrites?".to_string());
-    lines.push(
-        "- Are there official statements that confirm the latest developments?".to_string(),
-    );
+    lines.push("- Are there official statements that confirm the latest developments?".to_string());
 
     lines.join("\n")
 }
@@ -247,4 +249,30 @@ pub async fn deep_search_current_events(
     });
 
     (report, metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn score_rewards_results_with_a_published_date() {
+        let with_date = json!({"score": 0.5, "published_date": "2024-01-01"});
+        let without = json!({"score": 0.5});
+        assert!(score_result(&with_date, 0) > score_result(&without, 0));
+    }
+
+    #[test]
+    fn score_decays_with_query_index() {
+        let item = json!({"score": 0.5});
+        assert!(score_result(&item, 0) > score_result(&item, 3));
+    }
+
+    #[test]
+    fn query_plan_covers_the_topic() {
+        let now = Local::now();
+        let queries = query_plan("rust", &now);
+        assert_eq!(queries.len(), 4);
+        assert!(queries.iter().all(|q| q.contains("rust")));
+    }
 }

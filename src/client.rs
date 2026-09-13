@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use crate::config::MAX_TOKENS;
 use crate::search::{search_tool_schema, tavily_search};
 
+/// Maximum number of tool-call round-trips before we stop chasing the model.
+const MAX_TOOL_ITERATIONS: usize = 5;
+
 #[derive(Clone, Copy, Default)]
 pub struct Usage {
     pub prompt_tokens: u64,
@@ -31,11 +34,8 @@ pub struct ChatClient {
 
 impl ChatClient {
     pub fn new(base_url: String, api_key: String) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
         Ok(Self {
-            http,
+            http: crate::http::client().clone(),
             base_url,
             api_key,
             last_usage: None,
@@ -64,6 +64,7 @@ impl ChatClient {
     {
         let tools = vec![search_tool_schema()];
         let mut convo: Vec<Value> = messages.to_vec();
+        let mut tool_rounds = 0usize;
 
         loop {
             let (content, tool_calls) = self
@@ -71,6 +72,14 @@ impl ChatClient {
                 .await?;
 
             if tool_calls.is_empty() {
+                return Ok(content);
+            }
+
+            tool_rounds += 1;
+            if tool_rounds > MAX_TOOL_ITERATIONS {
+                on_token(&format!(
+                    "\n[tool-call limit of {MAX_TOOL_ITERATIONS} reached; stopping]"
+                ));
                 return Ok(content);
             }
 

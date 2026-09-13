@@ -35,8 +35,7 @@ pub async fn tavily_search_results(query: &str, max_results: u32) -> Result<Vec<
         return Err("Error: TAVILY_API_KEY not set in .env file.".to_string());
     }
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = crate::http::client()
         .post(TAVILY_URL)
         .json(&json!({
             "api_key": key,
