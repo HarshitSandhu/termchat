@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +106,9 @@ fn settings_path() -> PathBuf {
 }
 
 fn load_settings() -> Settings {
-    fs::read_to_string(settings_path())
+    let path = settings_path();
+    restrict_permissions(&path);
+    fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -113,8 +116,37 @@ fn load_settings() -> Settings {
 
 fn save_settings(settings: &Settings) {
     if let Ok(json) = serde_json::to_string_pretty(settings) {
-        let _ = fs::write(settings_path(), json);
+        let _ = write_private(&settings_path(), json.as_bytes());
     }
+}
+
+/// Write a file readable only by the current user, since settings hold API keys.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    // `mode` only applies when the file is created; tighten existing files too.
+    restrict_permissions(path);
+    opts.open(path)?.write_all(contents)
+}
+
+/// Make an existing file owner-only (no-op if missing or on non-Unix).
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The currently selected provider (defaults to Cerebras).

@@ -63,7 +63,7 @@ impl ChatClient {
         F: FnMut(&str),
     {
         let tools = vec![search_tool_schema()];
-        let mut convo: Vec<Value> = messages.to_vec();
+        let mut convo: Vec<Value> = api_messages(messages);
         let mut tool_rounds = 0usize;
 
         loop {
@@ -143,26 +143,26 @@ impl ChatClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            on_token(&format!("\n[API Error {status}]: {body}"));
-            return Ok((None, vec![]));
+            anyhow::bail!("API error {status}: {body}");
         }
 
         let mut collected = String::new();
         let mut tools_accum: BTreeMap<i64, ToolAccum> = BTreeMap::new();
-        let mut buf = String::new();
+        // Buffer raw bytes: a multi-byte UTF-8 character can be split across
+        // network chunks, so only decode once a full line is available.
+        let mut buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
 
         'outer: while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            buf.extend_from_slice(&chunk);
 
-            while let Some(pos) = buf.find('\n') {
-                let line: String = buf.drain(..=pos).collect();
-                let line = line.trim_end_matches(['\r', '\n']);
-
-                let Some(data) = line.strip_prefix("data: ") else {
+            while let Some(line) = take_line(&mut buf) {
+                // SSE allows an optional space after the field name.
+                let Some(data) = line.strip_prefix("data:") else {
                     continue;
                 };
+                let data = data.trim_start();
                 if data.trim() == "[DONE]" {
                     break 'outer;
                 }
@@ -232,7 +232,7 @@ impl ChatClient {
     pub async fn complete_chat(&mut self, messages: &[Value], model: &str) -> Option<String> {
         let payload = json!({
             "model": model,
-            "messages": messages,
+            "messages": api_messages(messages),
             "max_tokens": MAX_TOKENS,
             "stream": false,
         });
@@ -242,6 +242,7 @@ impl ChatClient {
             .post(&self.base_url)
             .bearer_auth(&self.api_key)
             .json(&payload)
+            .timeout(std::time::Duration::from_secs(180))
             .send()
             .await
             .ok()?;
@@ -263,5 +264,71 @@ impl ChatClient {
         data["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string)
+    }
+}
+
+/// Fields a chat-completions message may carry. Anything else (such as the
+/// local `metadata` attached to deep-search replies) is kept in saved history
+/// but stripped before sending, since strict providers reject unknown fields.
+const API_MESSAGE_FIELDS: [&str; 5] = ["role", "content", "name", "tool_calls", "tool_call_id"];
+
+fn api_messages(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|m| match m.as_object() {
+            Some(obj) => Value::Object(
+                obj.iter()
+                    .filter(|(k, _)| API_MESSAGE_FIELDS.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            None => m.clone(),
+        })
+        .collect()
+}
+
+/// Remove and decode the next complete line (without its line ending) from
+/// `buf`, or return `None` if no full line has arrived yet.
+fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+    let pos = buf.iter().position(|&b| b == b'\n')?;
+    let raw: Vec<u8> = buf.drain(..=pos).collect();
+    let line = String::from_utf8_lossy(&raw);
+    Some(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_messages_strips_local_fields() {
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": "report",
+            "metadata": {"type": "deepsearch"},
+        })];
+        assert_eq!(
+            api_messages(&messages),
+            vec![json!({"role": "assistant", "content": "report"})]
+        );
+    }
+
+    #[test]
+    fn take_line_keeps_multibyte_chars_split_across_chunks() {
+        let line = "data: héllo 🔍\n".as_bytes();
+        // Split inside the 4-byte emoji.
+        let split = line.len() - 3;
+        let mut buf = line[..split].to_vec();
+        assert_eq!(take_line(&mut buf), None);
+        buf.extend_from_slice(&line[split..]);
+        assert_eq!(take_line(&mut buf).as_deref(), Some("data: héllo 🔍"));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn take_line_strips_crlf() {
+        let mut buf = b"data: [DONE]\r\nrest".to_vec();
+        assert_eq!(take_line(&mut buf).as_deref(), Some("data: [DONE]"));
+        assert_eq!(buf, b"rest");
     }
 }

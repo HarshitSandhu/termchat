@@ -242,6 +242,7 @@ async fn stream_response(
         Ok(content) => content,
         Err(e) => {
             println!("\n{} {e}", "Error:".red());
+            println!("  {}", "Message not kept — press ↑ to resend.".dim());
             return None;
         }
     };
@@ -656,8 +657,13 @@ async fn main() -> Result<()> {
         messages.push(json!({"role": "user", "content": user_input}));
         print_status(&model, &client, Some("chatting"));
 
-        if let Some(content) = stream_response(&mut client, &messages, &model, &skin).await {
-            messages.push(json!({"role": "assistant", "content": content}));
+        match stream_response(&mut client, &messages, &model, &skin).await {
+            Some(content) => messages.push(json!({"role": "assistant", "content": content})),
+            // Drop the unanswered user turn so a retry doesn't send two
+            // consecutive user messages, which some providers reject.
+            None => {
+                messages.pop();
+            }
         }
 
         print_status(&model, &client, None);
