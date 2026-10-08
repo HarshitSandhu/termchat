@@ -14,8 +14,15 @@ fn ensure_history_dir() -> Result<()> {
 
 pub fn save_conversation(messages: &[Value], model: &str) -> Result<PathBuf> {
     ensure_history_dir()?;
-    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let filepath = history_dir().join(format!("{timestamp}.json"));
+    // Millisecond precision plus a counter avoids overwriting a conversation
+    // saved in the same second.
+    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
+    let mut filepath = history_dir().join(format!("{timestamp}.json"));
+    let mut suffix = 1;
+    while filepath.exists() {
+        filepath = history_dir().join(format!("{timestamp}-{suffix}.json"));
+        suffix += 1;
+    }
     let data = json!({"model": model, "messages": messages});
     fs::write(&filepath, serde_json::to_string_pretty(&data)?)?;
     Ok(filepath)

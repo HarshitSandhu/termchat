@@ -30,18 +30,50 @@ pub fn search_tool_schema() -> Value {
 /// Mirrors the Python `tavily_search_results`: returns `Err(message)` for any
 /// configuration or transport failure, and `Ok(vec![])` for an empty result set.
 pub async fn tavily_search_results(query: &str, max_results: u32) -> Result<Vec<Value>, String> {
+    tavily_search_with(query, max_results, json!({})).await
+}
+
+/// Run a recency-aware Tavily *news* search. The `news` topic and `days` window
+/// are what make Tavily return `published_date`, which deep search relies on for
+/// ranking.
+pub async fn tavily_news_search_results(
+    query: &str,
+    max_results: u32,
+) -> Result<Vec<Value>, String> {
+    tavily_search_with(
+        query,
+        max_results,
+        json!({"topic": "news", "search_depth": "advanced", "days": 30}),
+    )
+    .await
+}
+
+/// Shared Tavily request: merges `extra` into the body so callers can opt into
+/// news/advanced options without duplicating transport logic.
+async fn tavily_search_with(
+    query: &str,
+    max_results: u32,
+    extra: Value,
+) -> Result<Vec<Value>, String> {
     let key = tavily_api_key();
     if key.is_empty() {
         return Err("Error: TAVILY_API_KEY not set in .env file.".to_string());
     }
 
+    let mut body = json!({
+        "api_key": key,
+        "query": query,
+        "max_results": max_results,
+    });
+    if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+
     let resp = crate::http::client()
         .post(TAVILY_URL)
-        .json(&json!({
-            "api_key": key,
-            "query": query,
-            "max_results": max_results,
-        }))
+        .json(&body)
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await

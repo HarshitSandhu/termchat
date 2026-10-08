@@ -2,7 +2,7 @@ use chrono::{DateTime, Local};
 use serde_json::{json, Value};
 
 use crate::client::ChatClient;
-use crate::search::tavily_search_results;
+use crate::search::tavily_news_search_results;
 
 #[derive(Clone)]
 pub struct DeepSearchResult {
@@ -40,12 +40,19 @@ fn score_result(result: &Value, query_index: usize) -> f64 {
 }
 
 async fn collect_results(queries: &[String]) -> (Vec<DeepSearchResult>, Vec<String>) {
+    // Fire all queries concurrently; the shared HTTP client pools the
+    // connections, so this is much faster than a sequential loop.
+    let searches = queries.iter().enumerate().map(|(idx, query)| async move {
+        (idx, query, tavily_news_search_results(query, 5).await)
+    });
+    let outcomes = futures_util::future::join_all(searches).await;
+
     let mut collected: Vec<DeepSearchResult> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (idx, query) in queries.iter().enumerate() {
-        match tavily_search_results(query, 5).await {
+    for (idx, query, outcome) in outcomes {
+        match outcome {
             Err(msg) => errors.push(format!("{query}: {msg}")),
             Ok(results) => {
                 for item in &results {
@@ -201,7 +208,7 @@ pub async fn deep_search_current_events(
 
     progress("Planning queries");
     progress("Searching recent coverage");
-    let (findings, errors) = collect_results(&queries).await;
+    let (findings, mut errors) = collect_results(&queries).await;
 
     if findings.is_empty() {
         let error_text = if errors.is_empty() {
@@ -226,8 +233,12 @@ pub async fn deep_search_current_events(
         .complete_chat(&[json!({"role": "user", "content": prompt})], model)
         .await
     {
-        Some(text) if !text.trim().is_empty() => text,
-        _ => fallback_report(&findings, &now),
+        Ok(Some(text)) if !text.trim().is_empty() => text,
+        Ok(_) => fallback_report(&findings, &now),
+        Err(e) => {
+            errors.push(format!("Synthesis: {e}"));
+            fallback_report(&findings, &now)
+        }
     };
 
     let sources: Vec<Value> = findings

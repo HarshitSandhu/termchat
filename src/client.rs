@@ -228,8 +228,14 @@ impl ChatClient {
         Ok((content, tool_calls))
     }
 
-    /// Non-streaming completion, used by deep search synthesis.
-    pub async fn complete_chat(&mut self, messages: &[Value], model: &str) -> Option<String> {
+    /// Non-streaming completion, used by deep search synthesis. Returns
+    /// `Err(message)` for transport/API failures so callers can report them,
+    /// and `Ok(None)` when the model returned no content.
+    pub async fn complete_chat(
+        &mut self,
+        messages: &[Value],
+        model: &str,
+    ) -> Result<Option<String>, String> {
         let payload = json!({
             "model": model,
             "messages": api_messages(messages),
@@ -245,13 +251,18 @@ impl ChatClient {
             .timeout(std::time::Duration::from_secs(180))
             .send()
             .await
-            .ok()?;
+            .map_err(|e| format!("request failed: {e}"))?;
 
         if !resp.status().is_success() {
-            return None;
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("API error {status}: {body}"));
         }
 
-        let data: Value = resp.json().await.ok()?;
+        let data: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("invalid response: {e}"))?;
 
         if let Some(usage) = data.get("usage").filter(|u| !u.is_null()) {
             self.last_usage = Some(Usage {
@@ -261,9 +272,9 @@ impl ChatClient {
             });
         }
 
-        data["choices"][0]["message"]["content"]
+        Ok(data["choices"][0]["message"]["content"]
             .as_str()
-            .map(str::to_string)
+            .map(str::to_string))
     }
 }
 
